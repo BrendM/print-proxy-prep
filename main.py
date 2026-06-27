@@ -92,6 +92,8 @@ def pdf_gen(p_dict, size):
     pages = canvas.Canvas(pdf_fp, pagesize=size)
     cols, rows = int(pw // w), int(ph // h)
     rx, ry = round((pw - (w * cols)) / 2), round((ph - (h * rows)) / 2)
+    rx += cfg.getint("Margin.X")
+    ry += cfg.getint("Margin.Y")
     total_cards = sum(img_dict.values())
     pbreak = cols * rows
     i = 0
