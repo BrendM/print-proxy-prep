@@ -7,7 +7,7 @@ import subprocess
 import configparser
 import io
 import re
-from PIL import Image, ImageFilter
+from PIL import Image, ImageCms, ImageFilter
 import PySimpleGUI as sg
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter, A4, legal
@@ -74,6 +74,35 @@ def draw_cross(can, x, y, c=6, s=1):
     can.line(x - c, y, x + c, y)
     can.setStrokeColorRGB(0, 0, 0)
     can.line(x, y - c, x, y + c)
+
+
+def apply_icc(image, icc_path, intent="perceptual"):
+    """Soft-proof by converting sRGB -> printer profile -> sRGB round-trip.
+    No-op if icc_path is blank or missing."""
+    if not icc_path or not os.path.exists(icc_path):
+        return image
+    src_profile = ImageCms.createProfile("sRGB")
+    dst_profile = ImageCms.getOpenProfile(icc_path)
+    dst_space = dst_profile.profile.xcolor_space.strip()  # "RGB" or "CMYK"
+    intents = {
+        "perceptual": ImageCms.Intent.PERCEPTUAL,
+        "relative_colorimetric": ImageCms.Intent.RELATIVE_COLORIMETRIC,
+        "saturation": ImageCms.Intent.SATURATION,
+        "absolute_colorimetric": ImageCms.Intent.ABSOLUTE_COLORIMETRIC,
+    }
+    render_intent = intents.get(intent.lower(), ImageCms.Intent.PERCEPTUAL)
+    # Forward: sRGB -> printer space
+    fwd = ImageCms.buildTransform(
+        src_profile, dst_profile, "RGB", dst_space, render_intent,
+        flags=ImageCms.Flags.BLACKPOINTCOMPENSATION,
+    )
+    proof = ImageCms.applyTransform(image, fwd)
+    # Reverse: printer space -> sRGB (soft-proof so preview and PDF show print colors)
+    rev = ImageCms.buildTransform(
+        dst_profile, src_profile, dst_space, "RGB", render_intent,
+        flags=ImageCms.Flags.BLACKPOINTCOMPENSATION,
+    )
+    return ImageCms.applyTransform(proof, rev)
 
 
 def pdf_gen(p_dict, size):
@@ -166,6 +195,8 @@ def cropper(folder, img_dict):
                 crop_im = crop_im.filter(ImageFilter.UnsharpMask(1, 20, 8))
             if cfg.getboolean("Vibrance.Bump"):
                 crop_im = crop_im.filter(lut)
+            if cfg.get("Printer.ICC", fallback=""):
+                crop_im = apply_icc(crop_im, cfg["Printer.ICC"], cfg.get("Rendering.Intent", fallback="perceptual"))
             crop_im.save(os.path.join(crop_dir, img_file), quality=98)
     return cache_previews(img_cache, crop_dir) if i>0 else img_dict
 
