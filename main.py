@@ -91,6 +91,11 @@ def apply_icc(image, icc_path, intent="perceptual"):
         "absolute_colorimetric": ImageCms.Intent.ABSOLUTE_COLORIMETRIC,
     }
     render_intent = intents.get(intent.lower(), ImageCms.Intent.PERCEPTUAL)
+    print(
+        f"ICC soft-proof: {os.path.basename(icc_path)}  "
+        f"space={dst_space}  intent={intent}  "
+        f"bpc=True"
+    )
     # Forward: sRGB -> printer space
     fwd = ImageCms.buildTransform(
         src_profile, dst_profile, "RGB", dst_space, render_intent,
