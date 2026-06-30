@@ -7,7 +7,7 @@ import subprocess
 import configparser
 import io
 import re
-from PIL import Image, ImageCms, ImageFilter
+from PIL import Image, ImageCms, ImageFilter, ImageEnhance
 import PySimpleGUI as sg
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter, A4, legal
@@ -110,6 +110,24 @@ def apply_icc(image, icc_path, intent="perceptual"):
     return ImageCms.applyTransform(proof, rev)
 
 
+def boost_saturation(image, factor):
+    """Boost color saturation by `factor` (1.0 = no change, 1.15 = 15% boost).
+    Applied before ICC to compensate for CMYK gamut desaturation."""
+    if factor <= 1.0:
+        return image
+    print(f"Saturation boost: +{(factor - 1) * 100:.0f}%")
+    return ImageEnhance.Color(image).enhance(factor)
+
+
+def output_sharpen(image, radius=1.5, amount=50):
+    """Sharpen after all transforms to compensate for ink spread on paper."""
+    if amount <= 0:
+        return image
+    print(f"Output sharpen: radius={radius} amount={amount}")
+    return image.filter(ImageFilter.UnsharpMask(radius=radius, percent=amount, threshold=0))
+
+
+
 def pdf_gen(p_dict, size):
     rgx = re.compile(r"\W")
     img_dict = p_dict["cards"]
@@ -200,8 +218,16 @@ def cropper(folder, img_dict):
                 crop_im = crop_im.filter(ImageFilter.UnsharpMask(1, 20, 8))
             if cfg.getboolean("Vibrance.Bump"):
                 crop_im = crop_im.filter(lut)
+            if cfg.getfloat("Saturation.Boost", fallback=1.0) > 1.0:
+                crop_im = boost_saturation(crop_im, cfg.getfloat("Saturation.Boost"))
             if cfg.get("Printer.ICC", fallback=""):
                 crop_im = apply_icc(crop_im, cfg["Printer.ICC"], cfg.get("Rendering.Intent", fallback="perceptual"))
+            if cfg.getboolean("Sharpening.Enabled", fallback=False):
+                crop_im = output_sharpen(
+                    crop_im,
+                    cfg.getfloat("Sharpening.Radius", fallback=1.5),
+                    cfg.getint("Sharpening.Amount", fallback=50),
+                )
             crop_im.save(os.path.join(crop_dir, img_file), quality=98)
     return cache_previews(img_cache, crop_dir) if i>0 else img_dict
 
