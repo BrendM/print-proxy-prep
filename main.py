@@ -1,9 +1,10 @@
 import os
 import math
 import json
-import time
+import ast
 import base64
 import subprocess
+import sys
 import configparser
 import io
 import re
@@ -27,6 +28,50 @@ def popup(middle_text):
         no_titlebar=True,
         finalize=True,
     )
+
+
+class LiveCapture(io.StringIO):
+    """Tee stdout to terminal and a live-updating GUI log window."""
+    def __init__(self, window, key):
+        super().__init__()
+        self._stdout = sys.stdout
+        self._window = window
+        self._key = key
+    def __enter__(self):
+        sys.stdout = self
+        return self
+    def __exit__(self, *args):
+        sys.stdout = self._stdout
+    def write(self, s):
+        self._stdout.write(s)
+        super().write(s)
+        if self._window is not None:
+            self._window[self._key].update(self.getvalue(), append=True, autoscroll=True)
+            self._window.refresh()
+    def flush(self):
+        self._stdout.flush()
+
+
+def log_window(title, size=(80, 20)):
+    """Create a live-updating log window for crop/render output."""
+    layout = [
+        [sg.Multiline(size=size, font=("Courier", 10),
+                      key="LOG", disabled=True, autoscroll=True,
+                      expand_x=True, expand_y=True)],
+        [sg.Push(), sg.Button("Close", key="CLOSE", disabled=True), sg.Push()],
+    ]
+    w = sg.Window(title, layout, resizable=True,
+                  finalize=True, modal=False, keep_on_top=True)
+    w.refresh()
+    return w
+
+
+def bind_card_clicks(window):
+    """Bind left/right mouse click events on card image elements."""
+    for k in window.key_dict.keys():
+        if "CRD:" in str(k):
+            window[k].bind("<Button-1>", "-LEFT")
+            window[k].bind("<Button-3>", "-RIGHT")
 
 
 loading_window = popup("Loading...")
@@ -196,6 +241,11 @@ def pdf_gen(p_dict, size):
     ry += cfg.getint("Margin.Y")
     total_cards = sum(img_dict.values())
     pbreak = cols * rows
+    total_pages = math.ceil(total_cards / pbreak)
+    print(f"PDF: {total_cards} cards, {cols}x{rows} grid, {total_pages} page(s)")
+    print(f"Page: {pw/72:.1f} x {ph/72:.1f} in, orientation: {p_dict['orient']}")
+    print(f"Margins: X={cfg.getint('Margin.X')} Y={cfg.getint('Margin.Y')}")
+    print(f"Output: {os.path.basename(pdf_fp)}")
     i = 0
     for img in img_dict.keys():
         img_path = os.path.join(crop_dir, img)
@@ -204,6 +254,7 @@ def pdf_gen(p_dict, size):
             y, x = divmod(j, cols)
             if j == 0 and i > 0:
                 pages.showPage()
+                print(f"  — page {p + 1} —")
             pages.drawImage(
                 img_path,
                 x * w + rx,
@@ -211,6 +262,9 @@ def pdf_gen(p_dict, size):
                 w,
                 h,
             )
+            name = os.path.splitext(img)[0]
+            short = name[:40] + "…" if len(name) > 40 else name
+            print(f"  [{i + 1}/{total_cards}] {short}")
             if j == pbreak - 1 or i == total_cards - 1:
                 # Draw lines
                 cross = 6
@@ -222,6 +276,7 @@ def pdf_gen(p_dict, size):
     saving_window.refresh()
     pages.save()
     saving_window.close()
+    print(f"Saved: {os.path.basename(pdf_fp)}")
     try:
         subprocess.Popen([pdf_fp], shell=True)
     except Exception as e:
@@ -288,6 +343,10 @@ def cropper(folder, img_dict):
             if cfg.getint("Bleed.Pixels", fallback=0) > 0:
                 crop_im = add_bleed(crop_im, cfg.getint("Bleed.Pixels"))
             crop_im.save(os.path.join(crop_dir, img_file), quality=98)
+    if i > 0:
+        print(f"\n— Processed {i} image(s) —")
+    else:
+        print("\n— All images already processed, nothing to do —")
     return cache_previews(img_cache, crop_dir) if i>0 else img_dict
 
 
@@ -344,10 +403,10 @@ def img_frames_refresh(max_cols):
         if not os.path.exists(os.path.join(crop_dir, cardname)):
             print(f"{cardname} not found.")
             continue
-        idata = eval(
+        idata = ast.literal_eval(
             img_dict[cardname]
             if cardname in img_dict
-            else to_bytes(os.path.join(crop_dir, cardname))
+            else str(to_bytes(os.path.join(crop_dir, cardname)))
         )
         img_layout = [
             sg.Push(),
@@ -470,7 +529,8 @@ if os.path.exists(img_cache):
         img_dict = json.load(fp)
 if len(img_dict.keys()) < len(crop_list):
     img_dict = cache_previews(img_cache, crop_dir, img_dict)
-img_dict = cropper(image_dir, img_dict)
+if len(os.listdir(image_dir)) > len(crop_list):
+    print(f"{len(os.listdir(image_dir)) - len(crop_list)} new image(s) in images/ — run Cropper to process")
 
 if os.path.exists(print_json):
     with open(print_json, "r") as fp:
@@ -498,10 +558,7 @@ else:
 
 window = window_setup(print_dict["columns"])
 old_size = window.size
-for k in window.key_dict.keys():
-    if "CRD:" in str(k):
-        window[k].bind("<Button-1>", "-LEFT")
-        window[k].bind("<Button-3>", "-RIGHT")
+bind_card_clicks(window)
 loading_window.close()
 while True:
     event, values = window.read()
@@ -549,32 +606,40 @@ while True:
         oldwindow = window
         oldwindow.disable()
         grey_window = grey_out(window)
-
-        img_dict = cropper(image_dir, img_dict)
-        for img in os.listdir(crop_dir):
-            if img not in print_dict["cards"].keys():
-                print(f"{img} found and added to list.")
-                print_dict["cards"][img] = 1
-                
+        log_win = log_window("Cropper Output")
+        with LiveCapture(log_win, "LOG"):
+            img_dict = cropper(image_dir, img_dict)
+            for img in os.listdir(crop_dir):
+                if img not in print_dict["cards"].keys():
+                    print(f"{img} found and added to list.")
+                    print_dict["cards"][img] = 1
+        log_win["CLOSE"].update(disabled=False)
+        while True:
+            ev, _ = log_win.read()
+            if ev in (sg.WIN_CLOSED, "CLOSE"):
+                break
+        log_win.close()
         window = window_setup(print_dict["columns"])
         window.enable()
         window.bring_to_front()
         oldwindow.close()
         grey_window.close()
         window.refresh()
-        for k in window.key_dict.keys():
-            if "CRD:" in str(k):
-                window[k].bind("<Button-1>", "-LEFT")
-                window[k].bind("<Button-3>", "-RIGHT")
+        bind_card_clicks(window)
 
     if "RENDER" in event:
         window.disable()
         grey_window = grey_out(window)
-        render_window = popup("Rendering...")
-        render_window.refresh()
+        log_win = log_window("Render Output", size=(60, 8))
         lookup = {"Letter": letter, "A4": A4, "Legal": legal}
-        pdf_gen(print_dict, lookup[print_dict["pagesize"]])
-        render_window.close()
+        with LiveCapture(log_win, "LOG"):
+            pdf_gen(print_dict, lookup[print_dict["pagesize"]])
+        log_win["CLOSE"].update(disabled=False)
+        while True:
+            ev, _ = log_win.read()
+            if ev in (sg.WIN_CLOSED, "CLOSE"):
+                break
+        log_win.close()
         grey_window.close()
         window.enable()
         window.bring_to_front()
