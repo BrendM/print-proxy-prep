@@ -7,7 +7,8 @@ import subprocess
 import configparser
 import io
 import re
-from PIL import Image, ImageCms, ImageFilter, ImageEnhance
+from PIL import Image, ImageCms, ImageFilter, ImageEnhance, ImageOps
+import numpy as np
 import PySimpleGUI as sg
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter, A4, legal
@@ -127,6 +128,53 @@ def output_sharpen(image, radius=1.5, amount=50):
     return image.filter(ImageFilter.UnsharpMask(radius=radius, percent=amount, threshold=0))
 
 
+def auto_levels(image, clip_pct=0.5):
+    """Stretch histogram to use full range, clipping `clip_pct`% from each end.
+    Fixes low-contrast scans without affecting already-good images."""
+    if clip_pct <= 0:
+        return image
+    print(f"Auto-levels: clip {clip_pct}%")
+    return ImageOps.autocontrast(image, cutoff=clip_pct)
+
+
+def add_bleed(image, pixels):
+    """Extend canvas by `pixels` on each side, replicating edge pixels outward.
+    Gives cutting tolerance so miscut cards don't show white slivers."""
+    if pixels <= 0:
+        return image
+    print(f"Bleed: +{pixels}px each side")
+    w, h = image.size
+    nw, nh = w + 2 * pixels, h + 2 * pixels
+    result = Image.new(image.mode, (nw, nh))
+    result.paste(image, (pixels, pixels))
+    # edges
+    result.paste(image.crop((0, 0, w, 1)).resize((w, pixels)), (pixels, 0))
+    result.paste(image.crop((0, h-1, w, h)).resize((w, pixels)), (pixels, h + pixels))
+    result.paste(image.crop((0, 0, 1, h)).resize((pixels, h)), (0, pixels))
+    result.paste(image.crop((w-1, 0, w, h)).resize((pixels, h)), (w + pixels, pixels))
+    # corners
+    result.paste(image.crop((0, 0, 1, 1)).resize((pixels, pixels)), (0, 0))
+    result.paste(image.crop((w-1, 0, w, 1)).resize((pixels, pixels)), (w + pixels, 0))
+    result.paste(image.crop((0, h-1, 1, h)).resize((pixels, pixels)), (0, h + pixels))
+    result.paste(image.crop((w-1, h-1, w, h)).resize((pixels, pixels)), (w + pixels, h + pixels))
+    return result
+
+
+def preserve_rich_black(pre_icc, post_icc, threshold=30, strength=0.9):
+    """For pixels that were near-black before ICC, blend back toward original
+    darkness so they stay rich black instead of being lifted to weak K-only gray."""
+    pre_arr = np.array(pre_icc.convert('RGB'), dtype=np.float32)
+    post_arr = np.array(post_icc.convert('RGB'), dtype=np.float32)
+    # Mask: 1.0 at pure black, 0.0 at threshold and above
+    darkness = pre_arr.mean(axis=2)
+    mask = np.clip(1.0 - (darkness / threshold), 0, 1)
+    affected = (mask > 0.01).mean() * 100
+    # Blend: pull dark pixels back toward their pre-ICC darkness
+    result_arr = post_arr * (1 - mask[..., None] * strength) + pre_arr * (mask[..., None] * strength)
+    print(f"Rich black: threshold={threshold} strength={strength:.1f}  ({affected:.0f}% of pixels)")
+    return Image.fromarray(np.clip(result_arr, 0, 255).astype(np.uint8))
+
+
 
 def pdf_gen(p_dict, size):
     rgx = re.compile(r"\W")
@@ -207,6 +255,8 @@ def cropper(folder, img_dict):
                 f"{img_file} - DPI calculated: {dpi}, cropping {c} pixels around frame"
             )
             crop_im = im.crop((c, c, w - c, h - c))
+            if cfg.getfloat("Levels.Clip", fallback=0.0) > 0:
+                crop_im = auto_levels(crop_im, cfg.getfloat("Levels.Clip"))
             if dpi > cfg.getint("Max.DPI"):
                 crop_im = crop_im.resize(
                     (
@@ -220,14 +270,23 @@ def cropper(folder, img_dict):
                 crop_im = crop_im.filter(lut)
             if cfg.getfloat("Saturation.Boost", fallback=1.0) > 1.0:
                 crop_im = boost_saturation(crop_im, cfg.getfloat("Saturation.Boost"))
+            pre_icc = crop_im.copy() if cfg.getboolean("RichBlack.Enabled", fallback=False) else None
             if cfg.get("Printer.ICC", fallback=""):
                 crop_im = apply_icc(crop_im, cfg["Printer.ICC"], cfg.get("Rendering.Intent", fallback="perceptual"))
+            if pre_icc is not None:
+                crop_im = preserve_rich_black(
+                    pre_icc, crop_im,
+                    cfg.getint("RichBlack.Threshold", fallback=30),
+                    cfg.getfloat("RichBlack.Strength", fallback=0.9),
+                )
             if cfg.getboolean("Sharpening.Enabled", fallback=False):
                 crop_im = output_sharpen(
                     crop_im,
                     cfg.getfloat("Sharpening.Radius", fallback=1.5),
                     cfg.getint("Sharpening.Amount", fallback=50),
                 )
+            if cfg.getint("Bleed.Pixels", fallback=0) > 0:
+                crop_im = add_bleed(crop_im, cfg.getint("Bleed.Pixels"))
             crop_im.save(os.path.join(crop_dir, img_file), quality=98)
     return cache_previews(img_cache, crop_dir) if i>0 else img_dict
 
