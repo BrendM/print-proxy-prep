@@ -89,11 +89,12 @@ for folder in [image_dir, crop_dir]:
 config = configparser.ConfigParser()
 config.read(os.path.join(cwd, "config.ini"))
 cfg = config["DEFAULT"]
-(card_w, card_h, card_crop, cutmark_inset) = (
+(card_w, card_h, card_crop, cutmark_inset, cutmark_len) = (
     cfg.getfloat("Card.Width"),
     cfg.getfloat("Card.Height"),
     cfg.getfloat("Card.Crop"),
     cfg.getfloat("CutMark.Inset", fallback=0.0),
+    cfg.getfloat("CutMark.Length", fallback=0.059),
 )
 card_out_w = card_w - 2 * card_crop
 card_out_h = card_h - 2 * card_crop
@@ -115,27 +116,24 @@ def grey_out(main_window):
     return the_grey
 
 
-def draw_cross(can, x, y, c=6, s=1, inset=0):
-    """Draw cut-mark crosshair at (x, y). If inset > 0, lines are split into
-    four segments with a gap at centre so marks sit inside the card edge."""
-    dash = [s, s]
-    can.setLineWidth(s)
-    can.setDash(dash)
-    # vertical: top + bottom segments
-    can.setStrokeColorRGB(255, 255, 255)
-    can.line(x, y - c, x, y - inset)
-    can.line(x, y + inset, x, y + c)
-    can.setStrokeColorRGB(0, 0, 0)
-    can.line(x, y - c, x, y - inset)
-    can.line(x, y + inset, x, y + c)
-    # horizontal: left + right segments
-    can.setDash(dash, s)
-    can.setStrokeColorRGB(255, 255, 255)
-    can.line(x - c, y, x - inset, y)
-    can.line(x + inset, y, x + c, y)
-    can.setStrokeColorRGB(0, 0, 0)
-    can.line(x - c, y, x - inset, y)
-    can.line(x + inset, y, x + c, y)
+def draw_cut_dots(can, card_x, card_y, w, h, inset_pts):
+    """Draw red guide dots at each corner of a card, inset by `inset_pts`."""
+    can.setFillColorRGB(1, 0, 0)
+    for dx, dy in [(1, 1), (-1, 1), (1, -1), (-1, -1)]:
+        can.circle(card_x + w/2 + dx * (w/2 - inset_pts),
+                   card_y + h/2 + dy * (h/2 - inset_pts), 1, fill=1)
+
+
+def draw_cut_lines(can, card_x, card_y, w, h, inset_pts, length_in=0.059):
+    """Draw short lines from each inset dot inward along the cut path."""
+    L = length_in * 72  # inches to points
+    can.setStrokeColorRGB(1, 0, 0)
+    can.setLineWidth(0.5)
+    for dx, dy in [(1, 1), (-1, 1), (1, -1), (-1, -1)]:
+        dot_x = card_x + w/2 + dx * (w/2 - inset_pts)
+        dot_y = card_y + h/2 + dy * (h/2 - inset_pts)
+        can.line(dot_x, dot_y, dot_x - dx * L, dot_y)
+        can.line(dot_x, dot_y, dot_x, dot_y - dy * L)
 
 
 def apply_icc(image, icc_path, intent="perceptual"):
@@ -255,40 +253,37 @@ def pdf_gen(p_dict, size):
     rx, ry = round((pw - (w * cols)) / 2), round((ph - (h * rows)) / 2)
     rx += cfg.getint("Margin.X")
     ry += cfg.getint("Margin.Y")
-    total_cards = sum(img_dict.values())
+    # filter out missing crop files
+    card_list = []
+    for img, count in img_dict.items():
+        img_path = os.path.join(crop_dir, img)
+        if not os.path.exists(img_path):
+            print(f"  SKIP — file not found: {img}")
+            continue
+        card_list.extend([(img, img_path)] * count)
+    total_cards = len(card_list)
     pbreak = cols * rows
-    total_pages = math.ceil(total_cards / pbreak)
+    total_pages = math.ceil(total_cards / pbreak) if total_cards else 0
     print(f"PDF: {total_cards} cards, {cols}x{rows} grid, {total_pages} page(s)")
     print(f"Page: {pw/72:.1f} x {ph/72:.1f} in, orientation: {p_dict['orient']}")
     print(f"Margins: X={cfg.getint('Margin.X')} Y={cfg.getint('Margin.Y')}")
     print(f"Output: {os.path.basename(pdf_fp)}")
-    i = 0
-    for img in img_dict.keys():
-        img_path = os.path.join(crop_dir, img)
-        for n in range(img_dict[img]):
-            p, j = divmod(i, pbreak)
-            y, x = divmod(j, cols)
-            if j == 0 and i > 0:
-                pages.showPage()
-                print(f"  — page {p + 1} —")
-            pages.drawImage(
-                img_path,
-                x * w + rx,
-                y * h + ry,
-                w,
-                h,
-            )
-            name = os.path.splitext(img)[0]
-            short = name[:40] + "…" if len(name) > 40 else name
-            print(f"  [{i + 1}/{total_cards}] {short}")
-            if j == pbreak - 1 or i == total_cards - 1:
-                # Draw lines
-                cross = 6
-                inset_pts = cutmark_inset * 72
-                for cy in range(rows + 1):
-                    for cx in range(cols + 1):
-                        draw_cross(pages, rx + w * cx, ry + h * cy, cross, 1, inset_pts)
-            i += 1
+    for i, (img, img_path) in enumerate(card_list):
+        p, j = divmod(i, pbreak)
+        y, x = divmod(j, cols)
+        if j == 0 and i > 0:
+            pages.showPage()
+            print(f"  — page {p + 1} —")
+        card_x = x * w + rx
+        card_y = y * h + ry
+        pages.drawImage(img_path, card_x, card_y, w, h)
+        inset_pts = cutmark_inset * 72
+        draw_cut_dots(pages, card_x, card_y, w, h, inset_pts)
+        draw_cut_lines(pages, card_x, card_y, w, h, inset_pts, cutmark_len)
+
+        name = os.path.splitext(img)[0]
+        short = name[:40] + "…" if len(name) > 40 else name
+        print(f"  [{i + 1}/{total_cards}] {short}")
     saving_window = popup("Saving...")
     saving_window.refresh()
     pages.save()
@@ -322,7 +317,7 @@ def cropper(folder, img_dict):
             i += 1
             w, h = im.size
             c = round(card_crop * min(w / card_w, h / card_h))
-            dpi = c * (1 / card_crop)
+            dpi = min(w / card_w, h / card_h) if card_crop == 0 else c / card_crop
             print(
                 f"{img_file} - DPI calculated: {dpi}, cropping {c} pixels around frame"
             )
@@ -618,14 +613,13 @@ while True:
     if event in ["CROP", "RENDER"]:
         config.read(os.path.join(cwd, "config.ini"))
         cfg = config["DEFAULT"]
-        (card_w, card_h, card_crop, card_out_w, card_out_h, cutmark_inset) = (
+        (card_w, card_h, card_crop) = (
             cfg.getfloat("Card.Width"),
             cfg.getfloat("Card.Height"),
             cfg.getfloat("Card.Crop"),
-            cfg.getfloat("Card.OutputWidth"),
-            cfg.getfloat("Card.OutputHeight"),
-            cfg.getfloat("CutMark.Inset", fallback=0.0),
         )
+        card_out_w = card_w - 2 * card_crop
+        card_out_h = card_h - 2 * card_crop
 
     if "CROP" in event:
         oldwindow = window
