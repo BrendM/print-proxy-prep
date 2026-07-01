@@ -89,6 +89,14 @@ for folder in [image_dir, crop_dir]:
 config = configparser.ConfigParser()
 config.read(os.path.join(cwd, "config.ini"))
 cfg = config["DEFAULT"]
+(card_w, card_h, card_crop, cutmark_inset) = (
+    cfg.getfloat("Card.Width"),
+    cfg.getfloat("Card.Height"),
+    cfg.getfloat("Card.Crop"),
+    cfg.getfloat("CutMark.Inset", fallback=0.0),
+)
+card_out_w = card_w - 2 * card_crop
+card_out_h = card_h - 2 * card_crop
 
 def grey_out(main_window):
     the_grey = sg.Window(
@@ -107,19 +115,27 @@ def grey_out(main_window):
     return the_grey
 
 
-def draw_cross(can, x, y, c=6, s=1):
+def draw_cross(can, x, y, c=6, s=1, inset=0):
+    """Draw cut-mark crosshair at (x, y). If inset > 0, lines are split into
+    four segments with a gap at centre so marks sit inside the card edge."""
     dash = [s, s]
     can.setLineWidth(s)
     can.setDash(dash)
+    # vertical: top + bottom segments
     can.setStrokeColorRGB(255, 255, 255)
-    can.line(x, y - c, x, y + c)
+    can.line(x, y - c, x, y - inset)
+    can.line(x, y + inset, x, y + c)
     can.setStrokeColorRGB(0, 0, 0)
-    can.line(x - c, y, x + c, y)
+    can.line(x, y - c, x, y - inset)
+    can.line(x, y + inset, x, y + c)
+    # horizontal: left + right segments
     can.setDash(dash, s)
     can.setStrokeColorRGB(255, 255, 255)
-    can.line(x - c, y, x + c, y)
+    can.line(x - c, y, x - inset, y)
+    can.line(x + inset, y, x + c, y)
     can.setStrokeColorRGB(0, 0, 0)
-    can.line(x, y - c, x, y + c)
+    can.line(x - c, y, x - inset, y)
+    can.line(x + inset, y, x + c, y)
 
 
 def apply_icc(image, icc_path, intent="perceptual"):
@@ -224,7 +240,7 @@ def preserve_rich_black(pre_icc, post_icc, threshold=30, strength=0.9):
 def pdf_gen(p_dict, size):
     rgx = re.compile(r"\W")
     img_dict = p_dict["cards"]
-    w, h = 2.48 * 72, 3.46 * 72
+    w, h = card_out_w * 72, card_out_h * 72
     rotate = bool(p_dict["orient"] == "Landscape")
     size = tuple(size[::-1]) if rotate else size
     pw, ph = size
@@ -268,9 +284,10 @@ def pdf_gen(p_dict, size):
             if j == pbreak - 1 or i == total_cards - 1:
                 # Draw lines
                 cross = 6
+                inset_pts = cutmark_inset * 72
                 for cy in range(rows + 1):
                     for cx in range(cols + 1):
-                        draw_cross(pages, rx + w * cx, ry + h * cy)
+                        draw_cross(pages, rx + w * cx, ry + h * cy, cross, 1, inset_pts)
             i += 1
     saving_window = popup("Saving...")
     saving_window.refresh()
@@ -304,8 +321,8 @@ def cropper(folder, img_dict):
         with Image.open(os.path.join(folder, img_file)) as im:
             i += 1
             w, h = im.size
-            c = round(0.12 * min(w / 2.72, h / 3.7))
-            dpi = c*(1/0.12)
+            c = round(card_crop * min(w / card_w, h / card_h))
+            dpi = c * (1 / card_crop)
             print(
                 f"{img_file} - DPI calculated: {dpi}, cropping {c} pixels around frame"
             )
@@ -601,6 +618,14 @@ while True:
     if event in ["CROP", "RENDER"]:
         config.read(os.path.join(cwd, "config.ini"))
         cfg = config["DEFAULT"]
+        (card_w, card_h, card_crop, card_out_w, card_out_h, cutmark_inset) = (
+            cfg.getfloat("Card.Width"),
+            cfg.getfloat("Card.Height"),
+            cfg.getfloat("Card.Crop"),
+            cfg.getfloat("Card.OutputWidth"),
+            cfg.getfloat("Card.OutputHeight"),
+            cfg.getfloat("CutMark.Inset", fallback=0.0),
+        )
 
     if "CROP" in event:
         oldwindow = window
