@@ -137,7 +137,7 @@ def draw_cut_lines(can, card_x, card_y, w, h, inset_pts, length_in=0.059):
 
 
 def apply_icc(image, icc_path, intent="perceptual"):
-    """Soft-proof by converting sRGB -> printer profile -> sRGB round-trip.
+    """Converting sRGB -> printer profile
     No-op if icc_path is blank or missing."""
     if not icc_path or not os.path.exists(icc_path):
         return image
@@ -161,14 +161,7 @@ def apply_icc(image, icc_path, intent="perceptual"):
         src_profile, dst_profile, "RGB", dst_space, render_intent,
         flags=ImageCms.Flags.BLACKPOINTCOMPENSATION,
     )
-    proof = ImageCms.applyTransform(image, fwd)
-    # Reverse: printer space -> sRGB (soft-proof so preview and PDF show print colors)
-    rev = ImageCms.buildTransform(
-        dst_profile, src_profile, dst_space, "RGB", render_intent,
-        flags=ImageCms.Flags.BLACKPOINTCOMPENSATION,
-    )
-    return ImageCms.applyTransform(proof, rev)
-
+    return ImageCms.applyTransform(image, fwd)
 
 def boost_saturation(image, factor):
     """Boost color saturation by `factor` (1.0 = no change, 1.15 = 15% boost).
